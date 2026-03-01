@@ -45,6 +45,9 @@ python接管Claude Code的io，同样也可以接管codex，kimicode等等，任
 
 通过剪贴板操作，微信/QQ都能用
 
+![gif](https://github.com/user-attachments/assets/166eb684-4206-4467-98a5-28512acb7d89)
+
+
 ## 安装
 
 ### 环境要求
@@ -94,7 +97,8 @@ python main.py
 
 4. 保存配置、叉掉退出
 
-![peSXUTP.png](https://s41.ax1x.com/2026/03/02/peSXUTP.png)
+<img width="474" height="871" alt="背景" src="https://github.com/user-attachments/assets/a66c8ab1-63a9-4b4a-b186-3c810010f853" />
+
 
 ### 对话模式
 
