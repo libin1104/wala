@@ -170,24 +170,22 @@ wala/
 `wechat_info.config` 存储微信界面坐标信息：
 
 ```ini
-[capture_region]
-left = 100
-top = 100
-right = 500
-bottom = 800
+[screenshot]
+left_top = 40,204
+right_bottom = 529,810
 
-[copy_flow]
-dialog_box_x = 300
-dialog_box_y = 200
-copy_button_x = 350
-copy_button_y = 150
+[copy]
+dialog_pos = 441,775
+button_pos = 484,778
 
-[paste_flow]
-input_box_x = 300
-input_box_y = 750
-send_button_x = 450
-send_button_y = 750
+[paste]
+input_pos = 173,897
+button_pos = 202,928
 ```
+
+- `screenshot`: 截图区域（对话区域的左上角和右下角）
+- `copy`: 复制流程（对话框位置和复制按钮位置）
+- `paste`: 粘贴流程（输入框位置和发送按钮位置）
 
 ## 安全说明
 
