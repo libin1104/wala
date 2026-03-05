@@ -17,7 +17,10 @@ import os
 import tkinter as tk
 from tkinter import messagebox
 
-CONFIG_NAME = "wechat_info.config"
+from pathlib import Path
+
+CONFIG_PATH = Path.home() / ".claude_sessions" 
+CONFIG_NAME = CONFIG_PATH / "wechat_info.config"
 COUNTDOWN_SECONDS = 3
 
 
@@ -25,7 +28,7 @@ class CoordCollectorApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("WeChat 坐标采集器")
-        self.root.geometry("760x480")
+        self.root.geometry("640x380")
 
         self.values: dict[str, tuple[int, int] | None] = {
             "screenshot_left_top": None,
@@ -121,7 +124,7 @@ class CoordCollectorApp:
             side="left", padx=(8, 0)
         )
 
-        self.save_path_var = tk.StringVar(value=f"保存路径：{os.path.abspath(CONFIG_NAME)}")
+        self.save_path_var = tk.StringVar(value=f"{os.path.abspath(CONFIG_NAME)}")
         tk.Label(foot, textvariable=self.save_path_var, anchor="w", fg="#666").pack(
             side="left", padx=(16, 0)
         )
@@ -213,7 +216,7 @@ class CoordCollectorApp:
         self.values[key] = (x, y)
         self._refresh_value_label(key)
         self.status_var.set(
-            f"[{self.current_group_name}] 已记录第 {step_no}/{total} 步【{title}】: ({x}, {y})"
+            f"[{self.current_group_name}] 完成 {step_no}/{total}【{title}】: ({x}, {y})"
         )
 
         self.current_step_index += 1
@@ -287,12 +290,13 @@ class CoordCollectorApp:
             "button_pos": f"{pb[0]},{pb[1]}",
         }
 
+        os.makedirs(CONFIG_PATH, exist_ok=True)
         with open(CONFIG_NAME, "w", encoding="utf-8") as f:
             parser.write(f)
 
         path = os.path.abspath(CONFIG_NAME)
         self.status_var.set(f"配置已保存：{path}")
-        messagebox.showinfo("保存成功", f"已保存到\n{path}")
+        messagebox.showinfo("保存成功", f"已保存到\n{path}")        
 
 
 def selector() -> None:

@@ -59,14 +59,14 @@ python接管Claude Code的io，同样也可以接管codex，kimicode等等，任
 ### 依赖安装
 
 ```bash
-pip install pyautogui Pillow
+pip install pyautogui Pillow pyperclip
 ```
 
 ### 快速开始
 
 1. 克隆仓库
 ```bash
-git clone https://github.com/yourusername/wala.git
+git clone https://github.com/libin1104/wala.git
 cd wala
 ```
 
@@ -128,6 +128,18 @@ ABCD, 这个算法的时间复杂度是多少？
 
 支持的分隔符：`,`、`.`、`、`、`。`、`\n`
 
+
+### 失败处理（最新）
+
+为避免自动化中断，当前版本对常见失败采用“不中断 + 明确错误文案回传”策略：
+
+- 会话恢复失败：第一行返回 `ID检索失败，请更换ID`，第二行返回 `memory文件: <该ID目录>/memory.md`
+- `session_id.txt` 非法：`ID无效，请更换ID`
+- Claude CLI 不可用：`Claude CLI不可用，请检查安装与PATH`
+- Claude 响应超时：`Claude响应超时，请稍后重试`
+- Claude 限流：`Claude请求过于频繁，请稍后重试`
+- Claude 鉴权异常：`Claude鉴权失败，请重新登录`
+- 其他异常：`Claude调用失败，请稍后重试` 或 `执行失败：...`
 
 ### 特殊指令
 
@@ -198,10 +210,11 @@ button_pos = 202,928
 - `screenshot`: 截图区域（对话区域的左上角和右下角）
 - `copy`: 复制流程（对话框位置和复制按钮位置）
 - `paste`: 粘贴流程（输入框位置和发送按钮位置）
+- 默认配置路径：`~/.claude_sessions/wechat_info.config`
 
 ## 安全说明
 
-- 所有对话历史存储在本地 `~/claude_sessions/` 目录
+- 所有对话历史存储在本地 `~/.claude_sessions/` 目录
 - 不会上传任何数据到第三方服务器
 - Claude 调用通过本地 Claude CLI 进行
 

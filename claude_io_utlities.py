@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 # 会话根目录
-ROOT_DIR = Path.home() / "claude_sessions"
+ROOT_DIR = Path.home() / ".claude_sessions"
 # UID 持久化会话目录
 UID_DIR = ROOT_DIR / "uid"
 # 临时会话目录
@@ -29,6 +29,19 @@ SHORT_CODE_MESSAGE_PATTERN = re.compile(
 TURN_SEPARATOR = "\n---\n"
 # 临时模式最大上下文轮次
 MAX_CONTEXT_TURNS = 20
+# Claude 会话恢复失败错误标记
+SESSION_ID_NOT_FOUND_MARKER = "No conversation found with session ID"
+# 会话恢复失败时返回给调用方的固定提示
+SESSION_ID_NOT_FOUND_OUTPUT = "ID检索失败，请更换ID"
+# Claude CLI 超时时间（秒）
+CLAUDE_CALL_TIMEOUT_S = 90
+# 统一错误输出文案
+SESSION_ID_INVALID_OUTPUT = "ID无效，请更换ID"
+CLAUDE_CLI_NOT_FOUND_OUTPUT = "Claude CLI不可用，请检查安装与PATH"
+CLAUDE_CALL_TIMEOUT_OUTPUT = "Claude响应超时，请稍后重试"
+CLAUDE_RATE_LIMIT_OUTPUT = "Claude请求过于频繁，请稍后重试"
+CLAUDE_AUTH_ERROR_OUTPUT = "Claude鉴权失败，请重新登录"
+CLAUDE_GENERIC_ERROR_OUTPUT = "Claude调用失败，请稍后重试"
 
 def ensure_base_dirs() -> None:
     """确保基础目录结构存在。"""
@@ -147,14 +160,15 @@ def ask_claude(message: str, target_dir: Path, use_session_resume: bool) -> str:
         use_session_resume: 是否使用 session 恢复模式
     Returns:
         Claude 的回复文本
-    Raises:
-        RuntimeError: Claude CLI 执行失败
     """
     memory_file = target_dir / "memory.md"
     cmd = ["claude", "-p"]
     if use_session_resume:
         # UID 持久化模式：使用 --session-id 或 -r
-        sid, is_new_session = load_or_create_session_id(target_dir)
+        try:
+            sid, is_new_session = load_or_create_session_id(target_dir)
+        except ValueError:
+            return SESSION_ID_INVALID_OUTPUT
         if is_new_session:
             cmd.extend(["--session-id", sid])
         else:
@@ -170,9 +184,33 @@ def ask_claude(message: str, target_dir: Path, use_session_resume: bool) -> str:
             "bypassPermissions",
         ]
     )
-    proc = subprocess.run(cmd, input=prompt, text=True, capture_output=True)
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=prompt,
+            text=True,
+            capture_output=True,
+            timeout=CLAUDE_CALL_TIMEOUT_S,
+        )
+    except FileNotFoundError:
+        return CLAUDE_CLI_NOT_FOUND_OUTPUT
+    except subprocess.TimeoutExpired:
+        return CLAUDE_CALL_TIMEOUT_OUTPUT
     if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or f"claude exit {proc.returncode}")
+        stderr_text = proc.stderr.strip()
+        if SESSION_ID_NOT_FOUND_MARKER in stderr_text:
+            return f"{SESSION_ID_NOT_FOUND_OUTPUT}\nmemory文件: {memory_file}"
+        stderr_lower = stderr_text.lower()
+        if "rate limit" in stderr_lower or "too many requests" in stderr_lower:
+            return CLAUDE_RATE_LIMIT_OUTPUT
+        if (
+            "unauthorized" in stderr_lower
+            or "authentication" in stderr_lower
+            or "auth" in stderr_lower
+            or "login" in stderr_lower
+        ):
+            return CLAUDE_AUTH_ERROR_OUTPUT
+        return CLAUDE_GENERIC_ERROR_OUTPUT
     return proc.stdout.strip()
 
 def append_memory(memory_file: Path, user_text: str, assistant_text: str) -> None:
