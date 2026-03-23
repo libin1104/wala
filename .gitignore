@@ -1,5 +1,6 @@
 # macOS
 .DS_Store
+**/.DS_Store
 .AppleDouble
 .LSOverride
 
@@ -8,6 +9,7 @@
 
 # Python
 __pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
 *.so
@@ -40,6 +42,8 @@ wheels/
 
 # Config (optional - comment out if you want to share config)
 # wechat_info.config
+.env
+.claude/skills/modelscope-image/
 
 # Memory
 memory.md

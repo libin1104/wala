@@ -1,0 +1,4 @@
+interface:
+  display_name: "定时任务管理"
+  short_description: "为当前项目管理循环和一次性邮件任务"
+  default_prompt: "使用 $schedule-task-manager 为当前 qclaude 项目创建或管理一个循环或一次性邮件任务。"

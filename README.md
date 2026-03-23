@@ -1,139 +1,200 @@
 # WALA
 
-> **WechAt-cLAude** - 微信 AI 自动化解决方案
+> **WechAt-cLAude** - 基于官方 `openclaw-weixin` API 的微信 Claude 代理
 
-[![Python](https://img.shields.io/badge/Python-3.8%2B-blue)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+## 简介
 
-## 缘起
+当前版本不再驱动 `filehelper.weixin.qq.com` 浏览器页面，而是直接对接官方 `openclaw-weixin` 通道：
 
-微信没有官方 API，AI 自动化一直是死局。能不能像openclaw-tg一样操作ClaudeCode-Wechat?
+- 首次登录时向 `ilink` 后端请求二维码
+- 优先把二维码以 SVG 附件发到 `SMTP_TO`，发送失败时回退到终端 ASCII 二维码
+- 扫码确认后保存 `bot_token`
+- 通过 `getupdates` 长轮询接收新消息
+- 调用本地 Claude CLI 生成回复
+- 通过 `sendmessage` 和 `getuploadurl + CDN` 发回文本、图片、视频和文件
+- 全程向 `stdout` 输出 NDJSON 事件，方便外部监督或接管
 
-现有方案的问题：
-- 逆向 WeChat 协议 → 封号风险
-- 网页版微信接口 → 已被官方限制
-- Hook 注入 → 复杂且不稳定
+这条链路和 OpenClaw 官方 `@tencent-weixin/openclaw-weixin` 插件一致，属于“扫码登录微信 + HTTP JSON API + 长轮询”方案，不是公众号 webhook，也不是浏览器自动化。
 
-WALA 选择了一条不同的路：**模拟人类操作流程**
+## 当前能力
 
-```
-截图识别变化 → 剪贴板复制 → AI 生成回复 → 模拟粘贴发送
-```
+- 支持官方 `openclaw-weixin` 登录和收发消息
+- 支持多微信用户直聊，默认按 `profile + 对端用户` 隔离 Claude 上下文
+- 支持临时会话和 `UID, message` 持久化会话
+- 支持 `截屏` 指令：调用 macOS `screencapture` 后上传回当前微信会话
+- 支持接收图片、普通文件、视频、语音附件
+- 入站附件会先下载并完成官方 CDN 解密，再保存到本地
+- 支持发送图片、普通文件、视频；Claude 可通过 `FILE: /绝对路径` 或 `FILE: https://...` 触发发送
+- 收到“只有附件、没有文字”的消息时，会按当前微信用户缓存附件，并提示再发一条文字
+- Claude 长任务执行期间，每隔 2 分钟自动回一条进度消息
+- 支持定时邮件任务：创建、查看、修改、删除、启停
+- `stdout` 输出结构化事件：
+  - `status`
+  - `auth`
+  - `message_in`
+  - `claude_request`
+  - `claude_response`
+  - `message_out`
+  - `error`
 
-绕过 API 限制，兼容所有 AI 模型，稳定可靠。
+## 环境要求
 
-## 功能特性
-
-- 实时监控微信对话，自动检测新消息
-- 让python接管ClaudeCode的io
-- 复制消息到剪贴板，读取剪贴板作为输入
-- claude输出到剪贴板，粘贴到微信对话框并发送
-- 默认claudecode具有所有权限
-- **多会话管理系统**：4 位短码区分不同客户/对话
-- 对话历史持久化存储
-- GUI 可视化配置，5 分钟上手
-- 支持截屏自动发送
-- 长消息智能分段
-
-## 核心原理
-
-WALA 通过屏幕坐标识别 + AI 接口，打通微信和任何 AI 模型。
-
-不需要微信官方 API，不需要逆向破解，不需要特殊权限。
-
-python接管Claude Code的io，同样也可以接管codex，kimicode等等，任何大模型都能用。
-
-通过剪贴板操作，微信/QQ都能用
-
-![gif](https://github.com/user-attachments/assets/166eb684-4206-4467-98a5-28512acb7d89)
-
+- macOS
+- Python 3.8+
+- Claude CLI（已安装并可直接执行 `claude`）
+- 可用的 SMTP 配置
+  用于优先邮件发送登录二维码和定时邮件
 
 ## 安装
 
-### 环境要求
-
-- Python 3.8+
-- Claude CLI (已安装并配置)
-- macOS (目前仅支持 macOS)
-
-### 依赖安装
-
 ```bash
-pip install pyautogui Pillow pyperclip
+pip install -r requirements.txt
 ```
 
-### 快速开始
+## 快速开始
 
-1. 克隆仓库
-```bash
-git clone https://github.com/libin1104/wala.git
-cd wala
-```
+1. 启动主程序
 
-2. 运行主程序
 ```bash
 python main.py
 ```
 
-3. 首次运行会自动启动坐标配置 GUI
+2. 程序会尝试获取微信登录二维码
 
-## 使用方法
+3. 如果已配置 `SMTP_*`，二维码会以 SVG 附件发送到 `SMTP_TO`
 
-### 配置坐标
+4. 如果 SMTP 不可用，终端会打印 ASCII 二维码
 
-运行程序后，会自动打开坐标配置工具：
+5. 用手机微信扫码并确认登录
 
-1. **截图区域配置**
-   - 把鼠标放到微信对话区域左上角
-   - 把鼠标放到微信对话区右下角
+6. 登录成功后，凭证会保存到本地；下次启动默认复用 `default`
 
-2. **复制流程配置**
-   - 把鼠标放到消息框
-   - 右击消息框，把鼠标放到复制按钮上
+7. 程序会在后台持续长轮询微信消息；收到私聊消息后会自动：
+   - 识别文本和附件
+   - 下载并解密新收到的附件
+   - 调用 Claude CLI
+   - 把文本和附件回复发回当前微信用户
 
-3. **粘贴流程配置**
-   - 把鼠标放到输入框
-   - 右击输入框，把鼠标放到粘贴按钮上
+## 命令行参数
 
-4. 保存配置、叉掉退出
-
-<img width="474" height="871" alt="背景" src="https://github.com/user-attachments/assets/a66c8ab1-63a9-4b4a-b186-3c810010f853" />
-
-
-### 对话模式
-
-WALA 支持两种对话模式：
-
-#### 1. 临时模式
-
-直接输入消息，进行临时对话：
-
-```
-你好，请帮我写一段代码
+```bash
+python main.py --help
 ```
 
-#### 2. UID 持久化模式
+可用参数：
 
-使用 4 位短码创建持久化对话上下文：
+- `--poll-interval-s`：错误退避时的额外等待间隔
+- `--login-timeout-s`：首次登录等待超时
+- `--profile-name`：登录态名称，默认 `default`
 
+## 消息模式
+
+### 临时模式
+
+直接发送普通文本：
+
+```text
+你好，请帮我写一个正则
 ```
+
+默认会话按“当前 `profile` + 当前微信用户”隔离，不会像旧版文件传输助手那样所有人共享一个 `temp`。
+
+### UID 持久化模式
+
+用 4 位短码绑定当前微信用户下的 Claude 会话：
+
+```text
 ABCD, 请帮我写一个排序算法
 ```
 
-之后可以使用相同短码继续对话：
+后续继续使用相同短码：
 
-```
+```text
 ABCD, 这个算法的时间复杂度是多少？
 ```
 
-支持的分隔符：`,`、`.`、`、`、`。`、`\n`
+支持分隔符：`,`、`.`、`，`、`。`、换行。
 
+### 特殊指令
 
-### 失败处理（最新）
+- `截屏`
 
-为避免自动化中断，当前版本对常见失败采用“不中断 + 明确错误文案回传”策略：
+## 附件收发
 
-- 会话恢复失败：第一行返回 `ID检索失败，请更换ID`，第二行返回 `memory文件: <该ID目录>/memory.md`
+### 入站附件
+
+- 支持图片、普通文件、视频、语音。
+- 附件默认保存到 `~/.wclaude_sessions/runtime/inbox/`。
+- 所有入站媒体都通过官方 CDN 下载，并按协议完成 AES-128-ECB 解密。
+- 语音当前保存为原始文件（通常为 `.silk`），不做转写。
+- 如果一条消息只有附件没有文字，程序会按“当前微信用户”缓存附件，并回复：`文件已接收，接下来想对这个文件做什么呢？`
+
+### 出站附件
+
+- Claude 回复中单独一行写 `FILE: /绝对路径/xxx.pdf`，程序会上传该本地文件。
+- Claude 回复中单独一行写 `FILE: https://example.com/a.png`，程序会先下载再上传。
+- 图片、视频和普通文件都统一使用 `FILE:` 协议，程序会自动识别类型。
+- 文本会先发送，附件随后依次发送；`FILE:` 行本身不会再作为普通文本回发。
+
+## 官方 API 说明
+
+当前实现对齐的官方链路是：
+
+- 登录二维码：`GET /ilink/bot/get_bot_qrcode`
+- 登录确认：`GET /ilink/bot/get_qrcode_status`
+- 入站消息：`POST /ilink/bot/getupdates`
+- 出站文本/媒体消息：`POST /ilink/bot/sendmessage`
+- 上传前签名：`POST /ilink/bot/getuploadurl`
+- CDN：`https://novac2c.cdn.weixin.qq.com/c2c`
+
+可选环境变量：
+
+```bash
+WECHAT_OPENCLAW_BASE_URL="https://ilinkai.weixin.qq.com"
+WECHAT_OPENCLAW_CDN_BASE_URL="https://novac2c.cdn.weixin.qq.com/c2c"
+WECHAT_OPENCLAW_ROUTE_TAG=""
+WECHAT_OPENCLAW_BOT_TYPE="3"
+```
+
+## 定时任务
+
+定时任务逻辑和旧版本保持一致：
+
+- 任务管理：通过项目内 skill 创建、查看、修改、删除、启停
+- 任务执行：主循环登录成功后自动检查并发送邮件
+- 结果只发邮件，不回写微信
+
+需要的 SMTP 环境变量：
+
+```bash
+SMTP_HOST="smtp.example.com"
+SMTP_PORT="587"
+SMTP_USER="you@example.com"
+SMTP_PASS="your-app-password"
+SMTP_FROM="you@example.com"
+SMTP_TO="you@example.com"
+```
+
+可选：
+
+- `SMTP_USE_TLS=true`
+- 项目会自动读取根目录 `./.env`
+
+## NDJSON 输出示例
+
+```json
+{"type":"status","ts":"2026-03-23T15:00:00+0800","session":"...","chat":"openclaw-weixin","ok":true,"payload":{"stage":"startup"}}
+{"type":"auth","ts":"2026-03-23T15:00:03+0800","session":"...","chat":"openclaw-weixin","ok":false,"payload":{"state":"login_required"}}
+{"type":"auth","ts":"2026-03-23T15:00:08+0800","session":"...","chat":"openclaw-weixin","ok":false,"payload":{"state":"login_email_sent","attempt":1}}
+{"type":"message_in","ts":"2026-03-23T15:01:10+0800","session":"...","chat":"openclaw-weixin","ok":true,"payload":{"message_id":"123","text":"你好","from_user_id":"user@im.wechat"}}
+{"type":"message_out","ts":"2026-03-23T15:01:12+0800","session":"...","chat":"openclaw-weixin","ok":true,"payload":{"kind":"text","text":"你好，有什么我可以帮你？","to_user_id":"user@im.wechat"}}
+```
+
+## 失败处理
+
+Claude 调用仍沿用固定错误文案：
+
+- 会话恢复失败：`ID检索失败，请更换ID`
 - `session_id.txt` 非法：`ID无效，请更换ID`
 - Claude CLI 不可用：`Claude CLI不可用，请检查安装与PATH`
 - Claude 响应超时：`Claude响应超时，请稍后重试`
@@ -141,113 +202,35 @@ ABCD, 这个算法的时间复杂度是多少？
 - Claude 鉴权异常：`Claude鉴权失败，请重新登录`
 - 其他异常：`Claude调用失败，请稍后重试` 或 `执行失败：...`
 
-### 特殊指令
-
-- 发送 **"截屏"** 自动截屏并发送
-
-### 退出程序
-
-将鼠标移动到屏幕左上角或右上角即可退出
-
 ## 项目结构
 
-```
+```text
 wala/
-├── main.py                      # 主程序入口
-├── wechat_coord_gui.py          # 坐标配置 GUI
-├── wechat_auto_utlities.py      # 微信自动化工具
-├── claude_io_utlities.py        # Claude 对话管理
-├── wechat_info.config           # 配置文件（自动生成）
+├── main.py                     # 代理入口
+├── wechat_openclaw_agent.py    # 官方 openclaw-weixin HTTP API 连接层
+├── wechat_media_bridge.py      # 附件缓存、FILE 协议解析与资源准备
+├── claude_io_utlities.py       # Claude 会话与 memory 管理
+├── schedual_utilities.py       # 定时任务、SMTP 与邮件渲染共享逻辑
+├── tests/
+├── requirements.txt
 └── README.md
 ```
 
-## 工作流程
+## 本地状态路径
 
-```
-┌─────────────────┐
-│  屏幕区域截图     │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  图像差异检测     │
-└────────┬────────┘
-         │
-         ▼ 检测到变化
-┌─────────────────┐
-│  复制对话内容     │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ Claude -> 剪贴板 │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│    粘贴并发送     │
-└─────────────────┘
-```
-
-## 配置文件说明
-
-`wechat_info.config` 存储微信界面坐标信息：
-
-```ini
-[screenshot]
-left_top = 40,204
-right_bottom = 529,810
-
-[copy]
-dialog_pos = 441,775
-button_pos = 484,778
-
-[paste]
-input_pos = 173,897
-button_pos = 202,928
-```
-
-- `screenshot`: 截图区域（对话区域的左上角和右下角）
-- `copy`: 复制流程（对话框位置和复制按钮位置）
-- `paste`: 粘贴流程（输入框位置和发送按钮位置）
-- 默认配置路径：`~/.claude_sessions/wechat_info.config`
-
-## 安全说明
-
-- 所有对话历史存储在本地 `~/.claude_sessions/` 目录
-- 不会上传任何数据到第三方服务器
-- Claude 调用通过本地 Claude CLI 进行
-
-## 适用场景
-
-- 客户服务自动化
-- 商务沟通辅助
-- 社群运营管理
-- 个人 AI 助手
-
-## 技术栈
-
-- Python 3.8+
-- pyautogui - 自动化操作
-- PIL/Pillow - 图像处理
-- tkinter - GUI 界面
-- Claude CLI - AI 接口
+- 登录凭证：`~/.wclaude_sessions/openclaw_weixin/accounts/default.json`
+- 同步游标：`~/.wclaude_sessions/openclaw_weixin/sync_state/default.json`
+- 按用户隔离的 Claude 会话：`~/.wclaude_sessions/peer_sessions/openclaw_weixin/default/`
+- 待处理附件：`~/.wclaude_sessions/runtime/openclaw_weixin/pending_attachments/default/`
 
 ## 注意事项
 
-1. 首次使用需要配置坐标，建议在微信窗口固定位置使用
-2. 程序运行时请勿移动微信窗口
-3. 使用 Claude CLI 前请确保已正确配置
-4. 可以将微信对话页面置顶
+1. 当前默认按私聊用户处理消息，不做群聊适配。
+2. `截屏` 依赖 macOS `screencapture`。
+3. 出站附件通过官方 CDN 上传，依赖 `pycryptodome` 做 AES-128-ECB 加密。
+4. 登录二维码优先走邮件；如果邮件不可用，会退回终端二维码。
+5. 当前仓库仍保留旧的 `wechat_browser_agent.py` 作为历史实现参考，但主流程已切到官方 `openclaw-weixin`。
 
 ## License
 
 MIT License
-
-## 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
----
-
-**WALA - 微信 AI 自动化，从此开始**

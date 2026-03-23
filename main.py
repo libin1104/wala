@@ -1,197 +1,259 @@
 #!/usr/bin/env python3
+"""主入口：运行基于官方 openclaw-weixin 的微信代理。"""
+
+from __future__ import annotations
+
+import argparse
+import re
+from pathlib import Path
+from typing import Optional
 
 from claude_io_utlities import (
-    ROOT_DIR,
+    ClaudeCallResult,
     append_memory,
-    ask_claude,
+    ask_claude_result_with_callback,
+    build_runtime_prompt,
+    ensure_base_dirs,
     resolve_target,
 )
-from wechat_auto_utlities import (
-    capture_and_send,
-    capture_region_image,
-    compute_diff_ratio,
-    copy_dialog_to_clipboard,
-    load_wechat_config,
-    paste_from_clipboard_and_send,
+from wechat_media_bridge import PENDING_ATTACHMENTS_ACK_TEXT, build_claude_input, parse_claude_reply
+from wechat_openclaw_agent import (
+    DEFAULT_LOGIN_TIMEOUT_S,
+    DEFAULT_POLL_INTERVAL_S,
+    DEFAULT_PROFILE_NAME,
+    OpenClawWeixinAgent,
+    SyncMessage,
+    format_runtime_error,
 )
-from wechat_coord_gui import selector
-import pyautogui
-import re
-import time
 
-
-# 默认配置文件路径
-DEFAULT_CONFIG_PATH = ROOT_DIR / "wechat_info.config"
-# 默认轮询间隔（秒）
-DEFAULT_POLL_INTERVAL_S = 1.0
-# 默认差异比率阈值
-DEFAULT_DIFF_RATIO_THRESHOLD = 0.015
-# 默认像素阈值
-DEFAULT_PIXEL_THRESHOLD = 20
-# 触发退出的角落像素范围（左上角/右上角）
-DEFAULT_EXIT_CORNER_ZONE_PX = 10
-# 轮询等待步进（秒）
-DEFAULT_WAIT_STEP_S = 0.05
-# 仅 UID（无消息）输入检测
-UID_ONLY_PATTERN = re.compile(r"^[A-Za-z0-9]{4}$")
-# 仅 UID 时回传提示
-UID_ONLY_MESSAGE = "ID格式错误：仅输入了UID，请使用 'UID, message'"
-# 截屏触发词
 SCREENSHOT_TRIGGER = "截屏"
-# 初始化失败提示
-INIT_ERROR_PREFIX = "初始化失败"
+UID_ONLY_PATTERN = re.compile(r"^[A-Za-z0-9]{4}$")
+UID_ONLY_MESSAGE = "ID格式错误：仅输入了UID，请使用 'UID, message'"
+DEFAULT_PROGRESS_UPDATE_INTERVAL_S = 120.0
 
 
-def _mouse_in_exit_corner(corner_zone_px: int = DEFAULT_EXIT_CORNER_ZONE_PX) -> bool:
-    """检测鼠标是否位于左上角或右上角退出区域。"""
-    if corner_zone_px <= 0:
-        return False
-    x, y = pyautogui.position()
-    screen_width, _ = pyautogui.size()
-    in_left_top = (x < corner_zone_px and y < corner_zone_px)
-    in_right_top = (x >= screen_width - corner_zone_px and y < corner_zone_px)
-    return in_left_top or in_right_top
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="运行官方 openclaw-weixin 微信代理。",
+    )
+    parser.add_argument(
+        "--poll-interval-s",
+        type=float,
+        default=DEFAULT_POLL_INTERVAL_S,
+        help="主循环轮询间隔（秒）",
+    )
+    parser.add_argument(
+        "--login-timeout-s",
+        type=float,
+        default=DEFAULT_LOGIN_TIMEOUT_S,
+        help="首次登录等待超时（秒）",
+    )
+    parser.add_argument(
+        "--profile-name",
+        default=DEFAULT_PROFILE_NAME,
+        help="登录态 profile 名称，默认复用 `default`",
+    )
+    return parser
 
 
-def _interruptible_wait(
-    total_wait_s: float,
-    step_s: float = DEFAULT_WAIT_STEP_S,
-    corner_zone_px: int = DEFAULT_EXIT_CORNER_ZONE_PX,
-) -> bool:
-    """细粒度等待，期间如果鼠标进入退出角落则立即返回 True。"""
-    if total_wait_s <= 0:
-        return _mouse_in_exit_corner(corner_zone_px)
-    deadline = time.monotonic() + total_wait_s
-    while True:
-        if _mouse_in_exit_corner(corner_zone_px):
-            return True
-        remain = deadline - time.monotonic()
-        if remain <= 0:
-            return False
-        time.sleep(min(step_s, remain))
+def ask_claude_with_progress(
+    agent: OpenClawWeixinAgent,
+    reply_to: SyncMessage,
+    prompt: str,
+    target_dir: Path,
+    use_session_resume: bool,
+    *,
+    target_name: str,
+) -> ClaudeCallResult:
+    next_progress_at = DEFAULT_PROGRESS_UPDATE_INTERVAL_S
 
-
-def _format_runtime_error(exc: Exception) -> str:
-    """把异常转换为可直接回传给微信的明确文案。"""
-    if isinstance(exc, FileNotFoundError):
-        return "配置或系统资源不存在，请检查路径与安装状态"
-    if isinstance(exc, PermissionError):
-        return "权限不足，请检查系统辅助功能与文件权限"
-    text = str(exc).strip()
-    if not text:
-        text = exc.__class__.__name__
-    return f"执行失败：{text}"
-
-
-def _safe_send_text(cfg, text: str) -> None:
-    """尽力发送文本，发送失败时仅记录错误，不中断主流程。"""
-    try:
-        paste_from_clipboard_and_send(cfg, text)
-    except Exception as send_exc:
-        print(f"  [error]: 发送失败: {_format_runtime_error(send_exc)}")
-
-
-def main(
-    config_path: str = DEFAULT_CONFIG_PATH,
-    poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
-    diff_ratio_threshold: float = DEFAULT_DIFF_RATIO_THRESHOLD,
-    pixel_threshold: float = DEFAULT_PIXEL_THRESHOLD,
-    corner_zone_px: int = DEFAULT_EXIT_CORNER_ZONE_PX,
-) -> None:
-    """监控新对话变化并复制内容输出给claude code。"""
-    try:
-        selector()
-    except Exception:
-        ...
-    print("Start monitoring for new dialog changes.")
-    print("Press Ctrl+C to stop, or move mouse to left-top/right-top corner to exit.")
-
-    cfg = None
-    dialog_img_prev = None
-    while True:
-        if _mouse_in_exit_corner(corner_zone_px):
-            print("\nStopped by mouse corner exit.")
+    def _on_wait(elapsed_s: float) -> None:
+        nonlocal next_progress_at
+        if agent.stop_requested:
+            raise KeyboardInterrupt("stopped")
+        if elapsed_s < next_progress_at:
             return
-        try:
-            cfg = load_wechat_config(config_path)
-            dialog_img_prev = capture_region_image(cfg)
-            break
-        except Exception as exc:
-            o = f"{INIT_ERROR_PREFIX}：{_format_runtime_error(exc)}"
-            print(f"[error]: {o}")
-            if cfg is not None:
-                _safe_send_text(cfg, o)
-            if _interruptible_wait(
-                total_wait_s=max(poll_interval_s, DEFAULT_WAIT_STEP_S),
-                step_s=DEFAULT_WAIT_STEP_S,
-                corner_zone_px=corner_zone_px,
-            ):
-                print("\nStopped by mouse corner exit.")
-                return
+        elapsed_min = max(2, int(elapsed_s // 60))
+        progress_text = f"Agent 仍在处理，已用时{elapsed_min} min"
+        agent.send_text(reply_to, progress_text)
+        agent.emitter.emit(
+            "status",
+            payload={
+                "stage": "claude_progress",
+                "peer_user_id": reply_to.from_user_id,
+                "target": target_name,
+                "elapsed_min": elapsed_min,
+            },
+        )
+        next_progress_at += DEFAULT_PROGRESS_UPDATE_INTERVAL_S
 
-    while True:
-        if _mouse_in_exit_corner(corner_zone_px):
-            print("\nStopped by mouse corner exit.")
-            break
-        try:
-            dialog_img_curr = capture_region_image(cfg)
-            diff = compute_diff_ratio(
-                dialog_img_curr,
-                dialog_img_prev,
-                pixel_threshold=pixel_threshold,
+    return ask_claude_result_with_callback(
+        prompt,
+        target_dir,
+        use_session_resume,
+        on_wait=_on_wait,
+    )
+
+
+def process_message(agent: OpenClawWeixinAgent, message: SyncMessage) -> None:
+    agent.emitter.emit(
+        "message_in",
+        payload={
+            "message_id": message.message_id,
+            "text": message.text,
+            "timestamp": message.create_time_ms,
+            "from_user_id": message.from_user_id,
+            "to_user_id": message.to_user_id,
+            "attachment_count": len(message.attachments),
+        },
+    )
+    stripped = message.text.strip()
+    try:
+        if message.attachments and not stripped:
+            agent.append_pending_attachments(message)
+            agent.send_text(message, PENDING_ATTACHMENTS_ACK_TEXT)
+            return
+        if stripped == SCREENSHOT_TRIGGER:
+            agent.send_screenshot(message)
+            return
+        if UID_ONLY_PATTERN.fullmatch(stripped):
+            agent.send_text(message, UID_ONLY_MESSAGE)
+            return
+
+        target_dir, prompt, use_session_resume = resolve_target(
+            message.text,
+            temp_dir=agent.resolve_temp_dir(message),
+            uid_base_dir=agent.resolve_uid_root(message),
+        )
+        target_name = target_dir.name
+        pending_attachments = agent.load_pending_attachments(message)
+        attachments_for_claude = [*pending_attachments, *list(message.attachments)]
+        # `prompt` 是解析后的纯文本需求；有附件时再拼成真正发给 Claude 的输入。
+        prompt_for_claude = (
+            build_claude_input(prompt, attachments_for_claude) if attachments_for_claude else prompt
+        )
+        agent.emitter.emit(
+            "claude_request",
+            payload={
+                "target": target_name,
+                "message": prompt_for_claude,
+                "attachment_count": len(attachments_for_claude),
+                "peer_user_id": message.from_user_id,
+            },
+        )
+        # 运行时协议提示单独追加，避免覆盖附件信息或会话正文。
+        claude_result = ask_claude_with_progress(
+            agent,
+            message,
+            f"{prompt_for_claude}\n\n{build_runtime_prompt()}",
+            target_dir,
+            use_session_resume,
+            target_name=target_name,
+        )
+        append_memory(target_dir / "memory.md", prompt_for_claude, claude_result.text)
+        if not claude_result.ok:
+            error_payload = {
+                "stage": "claude_call",
+                "target": target_name,
+                "message": claude_result.text,
+                "peer_user_id": message.from_user_id,
+            }
+            if claude_result.error_type:
+                error_payload["error_type"] = claude_result.error_type
+            if claude_result.return_code is not None:
+                error_payload["return_code"] = claude_result.return_code
+            if claude_result.stderr:
+                error_payload["stderr"] = claude_result.stderr
+            agent.emitter.emit(
+                "error",
+                ok=False,
+                payload=error_payload,
             )
-            changed = (diff >= diff_ratio_threshold)
-            if changed:
-                i = copy_dialog_to_clipboard(cfg)
-                print(f"  [Q]:{i}")
-                stripped_i = i.strip()
-                target_name = "temp"
-                should_send_text = True
-                if stripped_i == SCREENSHOT_TRIGGER:
-                    capture_and_send(cfg)
-                    o = "screenshot captured and sent"
-                    should_send_text = False
-                elif UID_ONLY_PATTERN.fullmatch(stripped_i):
-                    o = UID_ONLY_MESSAGE
-                else:
-                    target_dir, message, use_session_resume = resolve_target(i)
-                    target_name = target_dir.name
-                    o = ask_claude(message, target_dir, use_session_resume)
-                    append_memory(target_dir / "memory.md", message, o)
-                print(f"  [A]:{o.replace(chr(10), chr(10) + '    ')}")
-                if should_send_text:
-                    loc = f"[{target_name}]:\n" if (target_name != "temp") else ""
-                    _safe_send_text(cfg, loc + o)
-                dialog_img_prev = capture_region_image(cfg)
-            if _interruptible_wait(
-                total_wait_s=poll_interval_s,
-                step_s=DEFAULT_WAIT_STEP_S,
-                corner_zone_px=corner_zone_px,
-            ):
-                print("\nStopped by mouse corner exit.")
+            agent.send_text(message, claude_result.text)
+            return
+        raw_reply = claude_result.text
+        parsed_reply = parse_claude_reply(raw_reply)
+        agent.emitter.emit(
+            "claude_response",
+            payload={
+                "target": target_name,
+                "message": raw_reply,
+                "resource_count": len(parsed_reply.resources),
+                "peer_user_id": message.from_user_id,
+            },
+        )
+        if parsed_reply.text:
+            text_to_send = (
+                parsed_reply.text if target_name == "temp" else f"[{target_name}]:\n{parsed_reply.text}"
+            )
+            agent.send_text(message, text_to_send)
+        agent.send_claude_resources(message, parsed_reply.resources)
+        if pending_attachments:
+            agent.clear_pending_attachments(message)
+    except Exception as exc:
+        message_text = format_runtime_error(exc)
+        agent.emitter.emit(
+            "error",
+            ok=False,
+            payload={
+                "stage": "process_message",
+                "message": message_text,
+                "peer_user_id": message.from_user_id,
+            },
+        )
+        try:
+            agent.send_text(message, message_text)
+        except Exception as send_exc:
+            agent.emitter.emit(
+                "error",
+                ok=False,
+                payload={"stage": "send_error_fallback", "message": format_runtime_error(send_exc)},
+            )
+
+
+def run_agent(agent: OpenClawWeixinAgent) -> int:
+    try:
+        ensure_base_dirs()
+        agent.bootstrap()
+        agent.prepare_session()
+        agent.begin_listening()
+        while agent.should_continue():
+            agent.run_due_schedule_tasks_once()
+            message = agent.dequeue_message()
+            if message is not None:
+                process_message(agent, message)
+                continue
+            if not agent.wait_for_next_poll():
                 break
-        except KeyboardInterrupt:
-            print("\nStopped.")
-            break
-        except pyautogui.FailSafeException:
-            print("\nStopped by pyautogui failsafe.")
-            break
-        except Exception as exc:
-            o = _format_runtime_error(exc)
-            print(f"  [A]:{o}")
-            _safe_send_text(cfg, o)
-            try:
-                dialog_img_prev = capture_region_image(cfg)
-            except Exception:
-                pass
-            if _interruptible_wait(
-                total_wait_s=max(poll_interval_s, DEFAULT_WAIT_STEP_S),
-                step_s=DEFAULT_WAIT_STEP_S,
-                corner_zone_px=corner_zone_px,
-            ):
-                print("\nStopped by mouse corner exit.")
-                break
+    except Exception as exc:
+        if agent.should_suppress_exception(exc):
+            return 0
+        raise
+    finally:
+        agent.shutdown()
+    return 0
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    agent = OpenClawWeixinAgent(
+        poll_interval_s=args.poll_interval_s,
+        login_timeout_s=args.login_timeout_s,
+        profile_name=args.profile_name,
+    )
+    try:
+        return run_agent(agent)
+    except KeyboardInterrupt:
+        agent.emitter.emit("status", payload={"stage": "stopped"})
+        return 0
+    except Exception as exc:
+        agent.emitter.emit(
+            "error",
+            ok=False,
+            payload={"stage": "fatal", "message": format_runtime_error(exc)},
+        )
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
